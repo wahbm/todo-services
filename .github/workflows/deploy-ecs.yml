@@ -1,0 +1,176 @@
+name: ECS preflight and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Run a read-only preflight or a previously approved deployment
+        required: true
+        default: preflight
+        type: choice
+        options: [preflight, deploy]
+
+concurrency:
+  group: todo-services-ecs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Test application
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest
+
+  preflight:
+    name: Read-only ECS preflight
+    needs: validate
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'preflight')
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+    steps:
+      - name: Configure strict SSH verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_PORT"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$SSH_PRIVATE_KEY"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Inspect server without changing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          sudo -n true
+          printf '== Operating system ==\n'
+          uname -srmo
+          printf '\n== Resource headroom ==\n'
+          df -h /
+          if command -v free >/dev/null 2>&1; then
+            free -h
+          else
+            head -n 5 /proc/meminfo
+          fi
+          printf '\n== Candidate collisions ==\n'
+          if sudo test -e /srv/wahbm/todo-services; then
+            echo 'Path collision: /srv/wahbm/todo-services already exists.' >&2
+            exit 1
+          fi
+          if sudo systemctl cat todo-services.service >/dev/null 2>&1; then
+            echo 'Service collision: todo-services.service already exists.' >&2
+            exit 1
+          fi
+          if sudo ss -ltnp | grep -Eq '[:.]8000[[:space:]]'; then
+            echo 'Port collision: TCP 8000 is already listening.' >&2
+            exit 1
+          fi
+          printf 'No collision found for proposed path, service, or port.\n'
+          printf '\n== Required host capabilities ==\n'
+          command -v nginx
+          command -v rsync
+          command -v python3
+          sudo nginx -t
+          REMOTE
+
+  deploy:
+    name: Deploy approved release
+    needs: validate
+    if: >-
+      (github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require approved deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_PATH"
+          case "$DEPLOY_PATH" in
+            /srv/wahbm/todo-services) ;;
+            *) echo 'DEPLOY_PATH is not the approved project path.' >&2; exit 1 ;;
+          esac
+      - name: Configure strict SSH verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Upload immutable runtime release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_path="$DEPLOY_PATH/releases/$GITHUB_SHA"
+          ssh -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$DEPLOY_PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" "sudo install -d -o $DEPLOY_USER -g $DEPLOY_USER -m 0755 '$release_path'"
+          rsync -az --exclude '.git/' --exclude '.github/' --exclude '.pytest_cache/' \
+            --exclude 'tests/' --exclude 'todo.db' --exclude '__pycache__/' \
+            -e "ssh -i $HOME/.ssh/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -p $DEPLOY_PORT" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$release_path/"
+      - name: Atomically activate and verify release
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' RELEASE='$GITHUB_SHA' bash -s" <<'REMOTE'
+          set -euo pipefail
+          release_path="$DEPLOY_PATH/releases/$RELEASE"
+          test -d "$release_path"
+          if test -e "$DEPLOY_PATH/current" && ! test -L "$DEPLOY_PATH/current"; then
+            echo 'Refusing to replace a non-symlink current path.' >&2
+            exit 1
+          fi
+          if test -L "$DEPLOY_PATH/current"; then
+            previous_target=$(readlink -f "$DEPLOY_PATH/current")
+            ln -sfnT "$previous_target" "$DEPLOY_PATH/previous"
+          fi
+          ln -sfnT "$release_path" "$DEPLOY_PATH/current"
+          sudo systemctl restart todo-services.service
+          sudo systemctl is-active --quiet todo-services.service
+          curl --fail --silent --show-error http://127.0.0.1:8000/health
+          REMOTE

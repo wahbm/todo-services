@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 
@@ -20,6 +21,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    root_path=os.getenv("ROOT_PATH", "").rstrip("/"),
     lifespan=lifespan,
 )
 
@@ -36,4 +38,3 @@ def health() -> HealthResponse:
 
 
 app.include_router(todos_router)
-
