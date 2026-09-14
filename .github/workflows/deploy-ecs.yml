@@ -193,5 +193,7 @@ jobs:
           ln -sfnT "$release_path" "$DEPLOY_PATH/current"
           sudo -n /usr/bin/systemctl restart todo-services.service
           sudo -n /usr/bin/systemctl is-active --quiet todo-services.service
-          curl --fail --silent --show-error http://127.0.0.1:8000/health
+          curl --fail --silent --show-error \
+            --retry 15 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:8000/health
           REMOTE
