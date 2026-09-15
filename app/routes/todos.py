@@ -2,6 +2,9 @@ import sqlite3
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
+
+from app.test_faults import ACTIVE_BUGS
 
 from app.database import get_db
 from app.schemas import (
@@ -92,9 +95,9 @@ def list_todos(
         SELECT * FROM todos
         {where_clause}
         ORDER BY id DESC
-        LIMIT ? OFFSET ?
+        {"" if 1 in ACTIVE_BUGS else "LIMIT ? OFFSET ?"}
         """,
-        [*params, page_size, offset],
+        params if 1 in ACTIVE_BUGS else [*params, page_size, offset],
     ).fetchall()
 
     return TodoListResponse(
@@ -121,6 +124,8 @@ def get_todo_stats(db: sqlite3.Connection = Depends(get_db)) -> TodoStatsRespons
         """
     ).fetchone()
     completed_count = row["completed"] or 0
+    if 3 in ACTIVE_BUGS:
+        return JSONResponse({"completed": completed_count, "active": row["total"] - completed_count})
     return TodoStatsResponse(
         total=row["total"],
         completed=completed_count,
@@ -138,6 +143,8 @@ def bulk_delete_todos(
     payload: TodoBulkDeleteRequest,
     db: sqlite3.Connection = Depends(get_db),
 ) -> TodoBulkDeleteResponse:
+    if 2 in ACTIVE_BUGS and len(payload.ids) == 1:
+        raise HTTPException(status_code=500, detail="Single-id bulk deletion failed")
     placeholders = ",".join("?" for _ in payload.ids)
     cursor = db.execute(
         f"DELETE FROM todos WHERE id IN ({placeholders})",
@@ -154,6 +161,8 @@ def bulk_delete_todos(
     description="Return a single todo by id.",
 )
 def get_todo(todo_id: int, db: sqlite3.Connection = Depends(get_db)) -> TodoResponse:
+    if 4 in ACTIVE_BUGS:
+        return JSONResponse({"id": get_todo_or_404(todo_id, db)["id"]})
     return row_to_todo(get_todo_or_404(todo_id, db))
 
 
@@ -171,7 +180,7 @@ def update_todo(
     get_todo_or_404(todo_id, db)
     changes = payload.model_dump(exclude_unset=True)
 
-    if changes:
+    if changes and 5 not in ACTIVE_BUGS:
         assignments = ", ".join(f"{field} = ?" for field in changes)
         values = [
             1 if field == "completed" and value else 0 if field == "completed" else value
@@ -206,6 +215,8 @@ def delete_todo(todo_id: int, db: sqlite3.Connection = Depends(get_db)) -> Respo
     description="Mark a todo as completed.",
 )
 def complete_todo(todo_id: int, db: sqlite3.Connection = Depends(get_db)) -> TodoResponse:
+    if 6 in ACTIVE_BUGS:
+        return row_to_todo(get_todo_or_404(todo_id, db))
     get_todo_or_404(todo_id, db)
     db.execute("UPDATE todos SET completed = 1 WHERE id = ?", (todo_id,))
     db.commit()
@@ -219,6 +230,8 @@ def complete_todo(todo_id: int, db: sqlite3.Connection = Depends(get_db)) -> Tod
     description="Mark a completed todo as active again.",
 )
 def reopen_todo(todo_id: int, db: sqlite3.Connection = Depends(get_db)) -> TodoResponse:
+    if 7 in ACTIVE_BUGS:
+        return row_to_todo(get_todo_or_404(todo_id, db))
     get_todo_or_404(todo_id, db)
     db.execute("UPDATE todos SET completed = 0 WHERE id = ?", (todo_id,))
     db.commit()

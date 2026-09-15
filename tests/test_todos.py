@@ -10,7 +10,9 @@ from app.main import app
 
 
 @pytest.fixture()
-def client(tmp_path: Path) -> Iterator[TestClient]:
+def client(tmp_path: Path, monkeypatch) -> Iterator[TestClient]:
+    # Verify the healthy baseline even while the deployed test faults are active.
+    monkeypatch.setattr("app.routes.todos.ACTIVE_BUGS", frozenset())
     db_path = tmp_path / "test.db"
     init_database(str(db_path))
 
