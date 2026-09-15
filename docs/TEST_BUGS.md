@@ -41,3 +41,14 @@ reopen 测试先在正常模式创建 completed=true 的记录，再开启故障
 沿用现有 GitHub Actions → ECS systemd/SQLite，目录 /srv/wahbm/todo-services。
 只增加少量 Python 代码，常驻内存基本不变；不迁移数据库、不新增服务。
 通过不可变 release 和 current 链接切换，已有 previous 保留上一版；正常恢复优先用开关修复后重新部署。
+
+## 本次执行结果
+
+- 故障代码提交：`2a66a0e`，已推送 main。
+- 部署成功：https://github.com/wahbm/todo-services/actions/runs/34976630862
+- ECS 预检成功：https://github.com/wahbm/todo-services/actions/runs/34976627258
+- 线上地址：http://8.130.116.192/davyluiy/todo-services
+- 2026-09-15 线上实测：1–7 全部复现；写接口均通过列表读取确认持久化数据未改变。
+- reopen 使用部署前创建且已完成的独立记录验证，确保测试前提有效。
+- 两条独立测试记录均通过单条 DELETE 清理成功，未操作既有业务记录。
+- 当前状态：7 项 bug 全部保留，等待用户发出全部或逐项修复指令。
